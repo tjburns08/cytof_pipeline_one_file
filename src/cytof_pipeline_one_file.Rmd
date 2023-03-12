@@ -1,0 +1,247 @@
+---
+title: "CyTOF pipeline for one file"
+output: html_document
+date: "2023-03-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+[Home](https://tjburns08.github.io/)
+
+The following is a data analysis pipeline for a single fcs file. This pipeline will give the user the ability to import a fcs file, turn it into an expression matrix, cluster it, make a frequency table, perform dimensionality reduction, and do various visualizations. This is a small piece of the CyTOF analysis scripts I have optimized over the past several years and it is grounded in best practices in the field. 
+
+We are going to operate under the assumption that the input file has been gated on live/dead and DNA by event_length (analogous to the scatter gates on flow cytometry).
+
+Now let's get acquainted with how CyTOF data are imported and processed. The data are stored as fcs files, which is a file format that has been used for flow cytometry long before CyTOF was developed. We are going to use the flowCore package to import the fcs file into a data structure called a flow frame. In reality, all we need is the expression matrix, which has each cell as a row and the markers as columns. Here is how you do that. 
+
+## Read in the file
+
+First, we set the working directory to the folder named “data” that is located in the same folder as the R script. The working directory is where R looks for files and saves outputs. The here::here() function is from the here package, which makes it easier to find files and folders. There's only one file in there. It's whole blood data.
+
+We use read.FCS() function from the flowCore package. The read.FCS() function returns an object of class flowFrame, which contains the data and metadata of the fcs file.
+
+```{r}
+library(flowCore)
+library(tidyverse)
+set.seed(1)
+setwd(here::here("data"))
+
+files <- list.files()
+ff <- flowCore::read.FCS(files[1])
+ff
+```
+
+There's a little bit we have to add here so that the column names of the expression matrix are the marker names and not the mass channel names. 
+
+```{r}
+mass_tags <- ff@parameters@data$name
+params <- ff@parameters@data$desc
+
+# All NA values in marker names will revert to mass tags names
+params <- ifelse(is.na(params), mass_tags, params)
+colnames(ff) <- params
+```
+
+
+We need to transform the data. In general, single cell data are transformed either logarithmically or log-like. For CyTOF, the best practices is the [asinh transform with a scale argument of 5](https://tjburns08.github.io/cytof_data_transformations.html). This means that you divide all the values of the matrix by 5 and then you perform an asinh transform on that. This is how CyTOF data have always been scaled from the beginning, though it doesn't look radically different than log(x + 1), which is used for single-cell sequencing. The goal is to make the data look as flow cytometry-like as possible (eg. you can gate it).
+
+Below, I show you what the expression matrix looks like before and after the transform, and then I set the new expression matrix values to that which is stored in the flow frame.
+
+```{r}
+exp <- flowCore::exprs(ff)
+as_tibble(exp)
+
+exp <- asinh(exp/5)
+as_tibble(exp)
+
+flowCore::exprs(ff) <- exp
+```
+
+The next step is to cluster the data. For that, we're going to use [FlowSOM](https://pubmed.ncbi.nlm.nih.gov/25573116/), which is in general the [best practices for clustering in the CyTOF field](https://pubmed.ncbi.nlm.nih.gov/27992111/) both in terms of run time and accurracy in comparison to manual gating. For rare subset discovery, consider using [X-shift](https://pubmed.ncbi.nlm.nih.gov/27183440/). But for the projects I have done, especially in pharama, FlowSOM has gotten the job done. 
+
+FlowSOM builds what is called a [self-organizing map](https://en.wikipedia.org/wiki/Self-organizing_map) with a default of 100 clusters evenly spaced in your data. Then similar clusters are merged until you have a specific number of pre-set clusters. How do you know how many clusters are in your data? The spoiler alert is you're going to have to run this tool a number of times. I would think about how many subset you expect given your panel, and how many islands you see on your [UMAP](https://pair-code.github.io/understanding-umap/) (stay tuned). It's better that you overcluster than undercluster.
+
+We use the high-level FlowSOM command, which performs the whole process. 
+
+We need to specify which columns to use. I'm going to do a shortcut and simply select for CD markers. The commands below simply look for the expressions in quotes in the vector of markers.
+
+```{r}
+params <- ff@parameters@data$desc
+cd <- grep("CD", params)
+ig <- grep("Ig", params)
+hla <- grep("HLA", params)
+
+surface <- c(cd, ig, hla)
+surface
+```
+
+The arguments to pay attention to are xdim and ydim, which specify the size of the SOM. Right now I have it set at 10x10, which gives you 100 clusters to start with. You can go higher, but the runtime goes down. Sofie VanGassen (author) has the [default at 7x7](https://bioconductor.org/packages/release/bioc/vignettes/FlowSOM/inst/doc/FlowSOM.pdf). The other one is colsToUse, which specifies the specific columns of the input flowFrame that will be used as clustering. Which do you want to cluster with? In general, surface markers rather than intracellular markers. 
+
+What is the final number of clusters? That's the nClus argument. The algorithm will produce 100 clusters, and then merge clusters until we have that number of clusters, which needs to be less than xdim*ydim. We'll be able to see what this looks like later.
+
+```{r}
+library(FlowSOM)
+
+fsom <- FlowSOM(ff,
+                # Input options:
+                compensate = FALSE, 
+                transform = FALSE,
+                scale = FALSE,
+                # SOM options:
+                colsToUse = surface, xdim = 10, ydim = 10,
+                # Metaclustering options:
+                nClus = 22)
+
+fsom
+```
+
+## Build frequency and expression tables
+
+The next question you're going to have when you cluster the data is what clusters express what markers, and what clusters appear at what frequencies. There are great tools for this, and in later markdowns, I'm going to show you how to use them. What I'm going to do here is show you how to do it from scratch. 
+
+First, let's look at percent of cells per cluster. To do that, we have to better understand what is inside the fsom object we just made. 
+
+We have the data here.
+
+```{r}
+cells <- fsom$data %>% as_tibble() 
+cells
+```
+
+We have the cluster and metacluster ID per cell here.
+
+```{r}
+clusters <- FlowSOM::GetClusters(fsom)
+clusters[1:10]
+
+metaclusters <- FlowSOM::GetMetaclusters(fsom) # Note that this is a vector of factors
+metaclusters[1:10]
+
+cells$cluster <- clusters
+cells$metacluster <- metaclusters
+```
+
+Now we tabulate the cell frequencies per cluster. Note that the variation between percent of cells per cluster widens with the metaclusters. This corresponds to the clusters representing the frequencies of actual cell subsets in our data. We're expressing these as percentages. Notice that there is one metacluster in the data that take up 42% of the total cells. These are the granulocytes.
+
+```{r}
+table(clusters) %>% sort() %>% `/`(nrow(ff)) %>% `*`(100)
+table(metaclusters) %>% sort() %>% `/`(nrow(ff)) %>% `*`(100) 
+```
+In later markdowns, this will take the form of a matrix, where each column is a different fcs file. 
+
+Now, let's look at average expression. We're going to create a matrix of markers by cluster ID and view it as a heatmap. This will allow us to determine which clusters express which markers. Again, we're going to do this from scratch.
+
+```{r}
+exp_mat <- lapply(sort(unique(metaclusters)), function(i) {
+    result <- dplyr::filter(cells, metaclusters == i)[,surface]
+    result <- apply(result, 2, mean)
+    return(result) # You don't have to return, but I do it to be explicit
+}) %>% dplyr::bind_rows()
+
+exp_mat
+```
+
+Now let's visualize it.
+
+```{r}
+library(pheatmap)
+pheatmap::pheatmap(exp_mat)
+```
+With the heatmap, you can figure out what clusters express what, and are therefore what cell type (or perhaps you have found a novel cell type). This heatmap matters when you're doing per-cluster statistics on multiple fcs files. When you find out that the frequency of cluster 2 changes in the control vs the treatment condition, you want to be able to quickly know what cluster 2 is.
+
+## Dimensionality reduction
+
+From here, we're going to do dimensionality reduction. We're going to use [UMAP](https://www.nature.com/articles/nbt.4314). It is a non-linear dimensionality reduction algorithm [similar to](https://www.youtube.com/watch?v=eN0wFzBA4Sc) [t-SNE](https://www.youtube.com/watch?v=NEaUSP4YerM) but with better global structure preservation (note that it is by no means perfect). It takes your original marker space and compresses it down to two dimensions, so we can visualize the data on a XY plot. Then, we can get an idea of what subsets are there at what frequencies. We don't want to over-interpret our map beyond that. See [my work here](https://tjburns08.github.io/tjb_dimr_talk.pdf) for more. 
+
+First, we're going to subsample our data so it doesn't take UMAP too long to compute. We don't need the whole dataset to get the insights we need.
+
+```{r}
+to_sample <- 20000
+cells_sub <- cells[sample(seq(nrow(cells)), to_sample),]
+```
+
+Now we run the R implementation of UMAP via the umap package.
+
+```{r}
+library(umap)
+
+dimr <- umap::umap(d = cells_sub[,surface])$layout %>% as_tibble()
+names(dimr) <- c("umap1", "umap2")
+```
+
+Now we can color the map by various markers. We're going to use a helper function I wrote to do that easily.
+
+```{r}
+
+#' @title Visualize dimension reduction plots 
+#' @description Plot dimension reduction map of interest colored by dimension 
+#' reduction comparison object of interest, with a blue to red color gradient.
+#' Color palette is an attempt at the Cytobank rainbow palette.
+#' @param cells Tibble of cells by features that the dimr was computed from
+#' @param dimr Tibble of dimension reduction axis 1 and axis 2
+#' @param marker vector of values for a particular marker
+#' @param lim_min Minimum value to be colored
+#' @param lim_max Maximum value to be colored
+#' @return ggplot2 object
+PlotViz <- function(cells, dimr, marker, lim_min = NULL, lim_max = NULL) {
+    
+    p <- ggplot(data = cells, aes(x = dimr[[1]], 
+                                  y = dimr[[2]], 
+                                  color = .data[[marker]])) + 
+        geom_point(shape = ".") +
+        xlab(names(dimr[1])) +
+        ylab(names(dimr[2])) + 
+        theme(legend.title = element_blank()) +
+        ggtitle(marker)
+    
+    if(is.factor(cells[[marker]])) {
+        # Add labels to the plot using geom_text
+        p <- p + geom_point(size = 1.2)
+        return(p)
+    }
+    
+    if(!is.null(lim_min)) {
+        p <- p + scale_color_gradientn(colors = c("blue", "cyan", "springgreen", "yellow", "orange", "red", "red4"), limits = c(lim_min, lim_max)) 
+    } else {
+        p <- p + scale_color_gradientn(colors = c("blue", "cyan", "springgreen", "yellow", "orange", "red", "red4")) 
+    }
+    
+    return(p)
+}
+```
+
+Let's start by plotting some markers.
+
+```{r}
+PlotViz(cells = cells_sub, dimr = dimr, marker = "209Bi_CD11b") # monocytes
+PlotViz(cells = cells_sub, dimr = dimr, marker = "195Pt_CD3") # T cells
+```
+
+Let's group these plots into a grid. Let's take the first nine surface markers.
+
+```{r}
+library(patchwork)
+
+p_list <- lapply(names(cells_sub[,surface][1:9]), function(i) {
+    PlotViz(cells = cells_sub, dimr = dimr, marker = i)
+})
+
+(p_list[[1]] + p_list[[2]] + p_list[[3]]) / (p_list[[4]] + p_list[[5]] + p_list[[6]]) / (p_list[[7]] + p_list[[8]] + p_list[[9]])
+```
+
+
+Now let's look at our clusters. Notice how the metaclusters begin to approximate the islands on the map. The islands on the map correspond to the most obvious cell subsets. In manual gating terms, these are the subsets that are obvious "blobs" on a biaxial plot.
+
+```{r}
+PlotViz(cells = cells_sub, dimr = dimr, marker = "cluster")
+PlotViz(cells = cells_sub, dimr = dimr, marker = "metacluster")
+```
+
+Remember, it is better to overcluster than to undercluster the data. I will leave it as an exercise to the reader to tinker with the number of clusters to determine the proper number. Note that this will involve first principles understanding of the expected number of subsets given the panel, plus the output you see on the heatmap and the dimension reduction map. Don't rely on any one tool.
+
+For more information about CyTOF analysis, please look at [CyTOF workflow](https://www.bioconductor.org/packages/release/workflows/vignettes/cytofWorkflow/inst/doc/cytofWorkflow.html) and [SPECTRE](https://immunedynamics.io/spectre/), both of which aggregate tools into high-level functions for data analysis.
+
+
+
