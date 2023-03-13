@@ -18,7 +18,7 @@ Now let's get acquainted with how CyTOF data are imported and processed. The dat
 
 ## Import and pre-processing
 
-First, we set the working directory to the folder named “data” that is located in the same folder as the R script. The working directory is where R looks for files and saves outputs. The here::here() function is from the here package, which makes it easier to find files and folders. There's only one file in there. It's whole blood data.
+First, we set the working directory to the folder named “data” that is located in the same folder as the R script. The working directory is where R looks for files and saves outputs. The here::here() function is from the here package, which makes it easier to find files and folders. There's only one file in there. The data analyzed in this markdown is healthy PBMCs from the Stanford HIMC, and can be found [here](https://flowrepository.org/experiments/1363/download_ziped_files). Note the PDF at the bottom, which explains more about the dataset.
 
 We use read.FCS() function from the flowCore package. The read.FCS() function returns an object of class flowFrame, which contains the data and metadata of the fcs file.
 
@@ -28,8 +28,7 @@ library(tidyverse)
 set.seed(1)
 setwd(here::here("data"))
 
-files <- list.files()
-ff <- flowCore::read.FCS(files[1])
+ff <- flowCore::read.FCS('081216-Mike-HIMC ctrls-001_01_normalized.fcs')
 ff
 ```
 
@@ -74,8 +73,9 @@ params <- ff@parameters@data$desc
 cd <- grep("CD", params)
 ig <- grep("Ig", params)
 hla <- grep("HLA", params)
+ccr <- c(grep("CCR", params), grep("CXC", params))
 
-surface <- c(cd, ig, hla)
+surface <- c(cd, ig, hla, ccr)
 surface
 ```
 
@@ -217,8 +217,8 @@ PlotViz <- function(cells, dimr, marker, lim_min = NULL, lim_max = NULL) {
 Let's start by plotting some markers.
 
 ```{r}
-PlotViz(cells = cells_sub, dimr = dimr, marker = "209Bi_CD11b") # monocytes
-PlotViz(cells = cells_sub, dimr = dimr, marker = "195Pt_CD3") # T cells
+PlotViz(cells = cells_sub, dimr = dimr, marker = "153Eu_CD11b") # monocytes
+PlotViz(cells = cells_sub, dimr = dimr, marker = "150Nd_CD3") # T cells
 ```
 
 Let's group these plots into a grid. Let's take the first nine surface markers.
