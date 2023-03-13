@@ -16,7 +16,7 @@ We are going to operate under the assumption that the input file has been gated 
 
 Now let's get acquainted with how CyTOF data are imported and processed. The data are stored as fcs files, which is a file format that has been used for flow cytometry long before CyTOF was developed. We are going to use the flowCore package to import the fcs file into a data structure called a flow frame. In reality, all we need is the expression matrix, which has each cell as a row and the markers as columns. Here is how you do that. 
 
-## Read in the file
+## Import and pre-processing
 
 First, we set the working directory to the folder named “data” that is located in the same folder as the R script. The working directory is where R looks for files and saves outputs. The here::here() function is from the here package, which makes it easier to find files and folders. There's only one file in there. It's whole blood data.
 
@@ -59,6 +59,8 @@ as_tibble(exp)
 flowCore::exprs(ff) <- exp
 ```
 
+## Clustering
+
 The next step is to cluster the data. For that, we're going to use [FlowSOM](https://pubmed.ncbi.nlm.nih.gov/25573116/), which is in general the [best practices for clustering in the CyTOF field](https://pubmed.ncbi.nlm.nih.gov/27992111/) both in terms of run time and accurracy in comparison to manual gating. For rare subset discovery, consider using [X-shift](https://pubmed.ncbi.nlm.nih.gov/27183440/). But for the projects I have done, especially in pharama, FlowSOM has gotten the job done. 
 
 FlowSOM builds what is called a [self-organizing map](https://en.wikipedia.org/wiki/Self-organizing_map) with a default of 100 clusters evenly spaced in your data. Then similar clusters are merged until you have a specific number of pre-set clusters. How do you know how many clusters are in your data? The spoiler alert is you're going to have to run this tool a number of times. I would think about how many subset you expect given your panel, and how many islands you see on your [UMAP](https://pair-code.github.io/understanding-umap/) (stay tuned). It's better that you overcluster than undercluster.
@@ -97,7 +99,7 @@ fsom <- FlowSOM(ff,
 fsom
 ```
 
-## Build frequency and expression tables
+## Building frequency and expression tables
 
 The next question you're going to have when you cluster the data is what clusters express what markers, and what clusters appear at what frequencies. There are great tools for this, and in later markdowns, I'm going to show you how to use them. What I'm going to do here is show you how to do it from scratch. 
 
@@ -143,7 +145,7 @@ exp_mat <- lapply(sort(unique(metaclusters)), function(i) {
 exp_mat
 ```
 
-Now let's visualize it.
+Now let's visualize it. I've been using the pheatmap package, which has worked well for me over the years.
 
 ```{r}
 library(pheatmap)
